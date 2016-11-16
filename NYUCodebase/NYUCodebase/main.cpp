@@ -5,11 +5,218 @@
 #include <SDL_opengl.h>
 #include <SDL_image.h>
 
+#include "ShaderProgram.h"
+#include <vector>
+#include <algorithm>
+#include <fstream>
+#include <string>
+#include <iostream>
+#include <sstream>
+
 #ifdef _WINDOWS
 	#define RESOURCE_FOLDER ""
 #else
 	#define RESOURCE_FOLDER "NYUCodebase.app/Contents/Resources/"
 #endif
+
+using namespace std;
+
+#define FIXED_TIMESTEP 0.0166666f
+#define MAX_TIMESTEPS 6
+#define LEVEL_HEIGHT_1
+#define LEVEL_WIDTH_1
+#define LEVEL_HEIGHT_2
+#define LEVEL_WIDTH_2
+#define SPRITE_COUNT_X 30
+#define SPRITE_COUNT_Y 30
+#define TILE_SIZE 0.2f
+
+unsigned char **levelData_1;
+unsigned char **levelData_2;
+unsigned char **levelData_3;
+
+ShaderProgram *program;
+Matrix projectionMatrix;
+Matrix modelMatrix;
+Matrix viewMatrix;
+
+int mapHeight;
+int mapWidth;
+
+GLuint LoadTexture(const char *image_path){
+	SDL_Surface *surface = IMG_Load(image_path);
+
+	GLuint textureID;
+	glGenTextures(1, &textureID);
+	glBindTexture(GL_TEXTURE_2D, textureID);
+
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, surface->w, surface->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, surface->pixels);
+
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+	SDL_FreeSurface(surface);
+
+	return textureID;
+}
+void worldToTileCoordinates(float worldX, float worldY, int *gridX, int *gridY)
+{
+	*gridX = (int)(worldX / TILE_SIZE);
+	*gridY = (int)(-worldY / TILE_SIZE);
+}
+float lerp(float v0, float v1, float t){
+	return (1.0 - t)*v0 + t*v1;
+}
+
+bool readHeader(std::ifstream &stream, unsigned char **levelData){
+	string line = "";
+	mapWidth = -1;
+	mapHeight = -1;
+	while (getline(stream, line)){
+		if (line == ""){ break; }
+
+		istringstream sStream(line);
+		string key, value;
+		getline(sStream, key, '=');
+		getline(sStream, value);
+
+		if (key == "width"){
+			mapWidth = atoi(value.c_str());
+		}
+		else if (key == "height"){
+			mapHeight = atoi(value.c_str());
+		}
+	}
+
+	if (mapWidth == -1 || mapHeight == -1){
+		return false;
+	}
+	else{
+		levelData = new unsigned char*[mapHeight];
+		for (int i = 0; i < mapHeight; ++i){
+			levelData[i] = new unsigned char[mapWidth];
+		}
+		return true;
+	}
+}
+bool readLayerData(std::ifstream &stream, unsigned char **levelData){
+	string line = "";
+	while (getline(stream, line)){
+		if (line == ""){ break; }
+		istringstream sStream(line);
+		string key, value;
+		getline(sStream, key, '=');
+		getline(sStream, value);
+		if (key == "data"){
+			for (int y = 0; y < mapHeight; y++){
+				getline(stream, line);
+				istringstream lineStream(line);
+				string tile;
+
+				for (int x = 0; x < mapWidth; x++){
+					getline(lineStream, tile, ',');
+					unsigned char val = (unsigned char)atoi(tile.c_str());
+					if (val > 0){
+						levelData[y][x] = val - 1;
+					}
+					else{
+						levelData[y][x] = 0;
+					}
+				}
+			}
+		}
+	}
+	return true;
+}
+bool readEntityData(std::ifstream &stream){
+	string line = "";
+	string type = "";
+
+	while (getline(stream, line)){
+		if (line == ""){ break; }
+
+		istringstream sStream(line);
+		string key, value;
+		getline(sStream, key, '=');
+		getline(sStream, value);
+
+		if (key == "type"){
+			type = value;
+		}
+		else if (key == "location"){
+			istringstream lineStream(value);
+			string xPosition, yPosition;
+			getline(lineStream, xPosition, ',');
+			getline(lineStream, yPosition, ',');
+
+			float placeX = (float)atoi(xPosition.c_str()) * TILE_SIZE;
+			float placeY = (float)atoi(yPosition.c_str()) * -TILE_SIZE + 0.5;
+
+			//placeEntity(type, placeX, placeY);
+		}
+	}
+	return true;
+}
+
+std::vector<float> vertexData;
+std::vector<float> texCoordData;
+
+void makeMap(unsigned char **levelData, int LEVEL_HEIGHT, int LEVEL_WIDTH){
+	texCoordData.clear();
+	vertexData.clear();
+	for (int y = 0; y < LEVEL_HEIGHT; y++){
+		for (int x = 0; x < LEVEL_WIDTH; x++){
+			if (levelData[y][x] != 0){
+				float u = (float)(((int)levelData[y][x]) % SPRITE_COUNT_X) / (float)SPRITE_COUNT_X;
+				float v = (float)(((int)levelData[y][x]) / SPRITE_COUNT_X) / (float)SPRITE_COUNT_Y;
+
+				float spriteWidth = 1.0f / (float)SPRITE_COUNT_X;
+				float spriteHeight = 1.0f / (float)SPRITE_COUNT_Y;
+
+				vertexData.insert(vertexData.end(), {
+					TILE_SIZE * x, -TILE_SIZE * y,
+					TILE_SIZE * x, (-TILE_SIZE * y) - TILE_SIZE,
+					(TILE_SIZE * x) + TILE_SIZE, (-TILE_SIZE * y) - TILE_SIZE,
+
+					TILE_SIZE * x, -TILE_SIZE * y,
+					(TILE_SIZE * x) + TILE_SIZE, (-TILE_SIZE * y) - TILE_SIZE,
+					(TILE_SIZE * x) + TILE_SIZE, -TILE_SIZE * y
+				});
+
+				texCoordData.insert(texCoordData.end(), {
+					u, v,
+					u, v + (spriteHeight),
+					u + spriteWidth, v + (spriteHeight),
+
+					u, v,
+					u + spriteWidth, v + (spriteHeight),
+					u + spriteWidth, v
+				});
+			}
+		}
+	}
+}
+
+GLuint sheet;
+
+void drawMap(){
+	program->setModelMatrix(modelMatrix);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+	glUseProgram(program->programID);
+	glVertexAttribPointer(program->positionAttribute, 2, GL_FLOAT, false, 0, vertexData.data());
+	glEnableVertexAttribArray(program->positionAttribute);
+	glVertexAttribPointer(program->texCoordAttribute, 2, GL_FLOAT, false, 0, texCoordData.data());
+	glEnableVertexAttribArray(program->texCoordAttribute);
+
+	modelMatrix.identity();
+	program->setModelMatrix(modelMatrix);
+
+	glBindTexture(GL_TEXTURE_2D, sheet);
+	glDrawArrays(GL_TRIANGLES, 0, vertexData.size() / 2);
+	glDisableVertexAttribArray(program->positionAttribute);
+	glDisableVertexAttribArray(program->texCoordAttribute);
+}
 
 SDL_Window* displayWindow;
 
